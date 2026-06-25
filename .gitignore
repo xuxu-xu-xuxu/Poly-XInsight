@@ -1,14 +1,3 @@
-# 一次性脚本 / 临时文件
-check_failed.py
-resume_job.py
-fix_domains.sql
-docx_output.txt
-scripts/stream_images.py
-scripts/auto_zip_test.ps1
-
-# 部署制品
-polyagent-deploy.tar.gz
-
 # 环境变量（含密钥）
 .env
 
@@ -36,12 +25,6 @@ test_inputs/
 # IDE
 .vscode/
 .idea/
-
-# 文档规划
-docs/
-
-# 调试日志
-MEMORY_USAGE_LOG.md
 
 # OS
 .DS_Store
