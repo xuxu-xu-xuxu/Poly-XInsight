@@ -1,0 +1,158 @@
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+    volumes:
+      - ./volumes/etcd:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - ./volumes/minio:/minio_data
+    command: minio server /minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  milvus:
+    image: milvusdb/milvus:v2.5.27
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - ./volumes/milvus:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      etcd:
+        condition: service_started
+      minio:
+        condition: service_healthy
+
+  es:
+    image: elasticsearch:8.15.3
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - xpack.security.enabled=true
+      - xpack.security.transport.ssl.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - ELASTIC_PASSWORD=YourPassword123!
+    volumes:
+      - ./volumes/es_data:/usr/share/elasticsearch/data
+      - ./volumes/es_plugins:/usr/share/elasticsearch/plugins
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -u elastic:YourPassword123! http://localhost:9200/_cluster/health >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 12
+
+  bge-m3:
+    build: ./bge-api
+    environment:
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://huggingface.co}
+      - MODEL_PATH=${BGE_MODEL_PATH:-BAAI/bge-m3}
+      - BGE_USE_FP16=${BGE_USE_FP16:-auto}
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./volumes/huggingface:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+    # GPU 配置：如果服务器有 NVIDIA GPU，取消下面注释
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: literature
+    volumes:
+      - ./volumes/postgres:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d literature"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      - MILVUS_HOST=milvus
+      - ES_HOST=http://es:9200
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/literature
+      - BGE_EMBED_URL=http://bge-m3:8000/embed
+      - LLM_PROVIDER=${LLM_PROVIDER:-deepseek}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.deepseek.com/v1}
+      - LLM_MODEL=${LLM_MODEL:-deepseek-chat}
+      - JWT_SECRET=${JWT_SECRET:-dev-secret-change-in-production}
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://huggingface.co}
+      - INGESTION_CONCURRENCY=${INGESTION_CONCURRENCY:-2}
+      - EMBEDDING_BATCH_SIZE=${EMBEDDING_BATCH_SIZE:-20}
+      - LLM_EXTRACT_CONCURRENCY=${LLM_EXTRACT_CONCURRENCY:-2}
+      - ENABLE_STRUCTURED_EXTRACTION=${ENABLE_STRUCTURED_EXTRACTION:-false}
+      - EXTRACTION_CONFIDENCE_THRESHOLD=${EXTRACTION_CONFIDENCE_THRESHOLD:-0.7}
+      - SCANSCI_DOWNLOAD_DIR=/app/downloads
+      - SCANSCI_DOWNLOAD_STRATEGY=${SCANSCI_DOWNLOAD_STRATEGY:-legal_only}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./downloads:/app/downloads
+      - ./schemas:/app/schemas
+      - ./volumes/huggingface:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health', timeout=5)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_started
+      es:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        API_BASE_URL: http://backend:8080
+    environment:
+      - API_BASE_URL=http://backend:8080
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
